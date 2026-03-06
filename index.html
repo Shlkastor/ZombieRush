@@ -198,49 +198,38 @@ class AudioManager {
     return buf;
   }
 
-  // ── Gunshot: pre-shaped noise + wet/dry convolver reverb ──────
-  // Architecture: crack → dry path | body+thump → reverb (wet) path
-  // Source: web.dev/webaudio-games, MDN createConvolver()
+  // ── Gunshot: three noise layers, no reverb (clean, tight "bang") ──
   shoot() {
     if (this.muted) return;
-    const ac  = this.ac, t = ac.currentTime;
-    const sr  = ac.sampleRate;
-    const dur = 0.20;
-    const len = Math.ceil(sr * dur);
+    const ac = this.ac, t = ac.currentTime;
+    const sr = ac.sampleRate;
 
-    // Per-sample exponential decay baked into buffer → sharpest possible attack
-    const buf = ac.createBuffer(1, len, sr);
-    const d   = buf.getChannelData(0);
-    for (let i = 0; i < len; i++) {
-      d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.038));
-    }
-
-    // Reverb convolver (wet channel)
-    const conv  = ac.createConvolver();
-    conv.buffer = this._getReverb(ac);
-    const wet   = ac.createGain(); wet.gain.value = 0.38;
-    conv.connect(wet); wet.connect(ac.destination);
-
-    // Dry output (direct to speakers)
-    const dry = ac.createGain(); dry.gain.value = 1.0;
-    dry.connect(ac.destination);
-
-    const layer = (filterType, freqA, freqB, gain, out) => {
-      const s = ac.createBufferSource(); s.buffer = buf;
-      const f = ac.createBiquadFilter(); f.type = filterType;
-      f.frequency.setValueAtTime(freqA, t);
-      if (freqB) f.frequency.exponentialRampToValueAtTime(freqB, t + 0.10);
-      const g = ac.createGain(); g.gain.value = gain;
-      s.connect(f); f.connect(g); g.connect(out);
-      s.start(t); s.stop(t + dur + 0.01);
+    // Helper: noise buffer with given exponential decay constant (seconds)
+    const mkNoise = (decaySec, durationSec) => {
+      const len = Math.ceil(sr * durationSec);
+      const buf = ac.createBuffer(1, len, sr);
+      const d   = buf.getChannelData(0);
+      for (let i = 0; i < len; i++)
+        d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * decaySec));
+      return buf;
     };
 
-    // Crack  — dry (close, sharp, no reverb smear)
-    layer('highpass', 3200, null,  4.2, dry);
-    // Body   — wet (5 kHz → 220 Hz sweep + room echo = "POW")
-    layer('lowpass',  5000, 220,   3.8, conv);
-    // Thump  — dry (sub doesn't need reverb, stays tight)
-    layer('lowpass',   110, null,  5.5, dry);
+    // Helper: play noise through a filter
+    const play = (buf, filterType, freq, Q, gain, dur) => {
+      const src = ac.createBufferSource(); src.buffer = buf;
+      const f   = ac.createBiquadFilter();
+      f.type = filterType; f.frequency.value = freq; f.Q.value = Q;
+      const g   = ac.createGain(); g.gain.value = gain;
+      src.connect(f); f.connect(g); g.connect(ac.destination);
+      src.start(t); src.stop(t + dur);
+    };
+
+    // Layer 1 — crack/snap: very sharp 8 ms decay, highpass 3 kHz
+    play(mkNoise(0.008, 0.06), 'highpass', 3000, 0.7, 5.5, 0.06);
+    // Layer 2 — punch: 28 ms decay, bandpass 650 Hz  (the "body" of the shot)
+    play(mkNoise(0.028, 0.12), 'bandpass',  650, 1.5, 4.5, 0.12);
+    // Layer 3 — thud: 18 ms decay, lowpass 180 Hz   (short, tight sub-kick)
+    play(mkNoise(0.018, 0.08), 'lowpass',   180, 0.5, 5.0, 0.08);
   }
 
   // ── Zombie groan "גרררר" ───────────────────────────────────────
@@ -366,7 +355,7 @@ class FriendlySoldier {
     const rl   = game.roadL, rr = game.roadR;
     this.x     = rand(rl + 10, rr - this.w - 10);
     this.y     = CFG.HUD_H;
-    this.speedY    = 2.4;          // descent speed (faster than normal zombies ~1.8)
+    this.speedY    = 2.0 + game._wave * 0.15;  // scales with wave (wave 3→2.45, wave 6→2.9...)
     this._lastShot = 0;            // timestamp of last shot (ms)
     this.active   = true;
     this.resolved = false;         // outcome already processed
@@ -485,18 +474,26 @@ class Player {
   update(now) {
     if (!this.alive) { this.blinkTimer++; return; }
     if (this.invTimer > 0) this.invTimer--;
-    const inp = this.game.input;
-    if (inp.left)  this.x = Math.max(this.game.roadL, this.x - CFG.P_SPEED);
-    if (inp.right) this.x = Math.min(this.game.roadR - this.w, this.x + CFG.P_SPEED);
+    const inp      = this.game.input;
+    const count    = this.game._soldierCount;
+    const SPACING  = 58;
+    const ROW_SIZE = 4;
+    const ROW_H    = this.h + 8;
+    // Clamping uses widest row (first row, max 4 soldiers)
+    const row0count      = Math.min(count, ROW_SIZE);
+    const halfFormation  = (row0count - 1) * SPACING / 2;
+    if (inp.left)  this.x = Math.max(this.game.roadL + halfFormation, this.x - CFG.P_SPEED);
+    if (inp.right) this.x = Math.min(this.game.roadR - this.w - halfFormation, this.x + CFG.P_SPEED);
     if (inp.shoot && now - this.lastShot >= CFG.SHOOT_CD) {
       this.lastShot = now;
       const cx = this.x + this.w / 2;
-      if (this.game._dualShot) {
-        // Two barrels — offset left and right
-        this.game.addBullet(new Bullet(cx - 16 - CFG.B_W / 2, this.y - 4, this.game));
-        this.game.addBullet(new Bullet(cx + 16 - CFG.B_W / 2, this.y - 4, this.game));
-      } else {
-        this.game.addBullet(new Bullet(cx - CFG.B_W / 2, this.y - 4, this.game));
+      for (let i = 0; i < count; i++) {
+        const row        = Math.floor(i / ROW_SIZE);
+        const posInRow   = i % ROW_SIZE;
+        const cntInRow   = Math.min(ROW_SIZE, count - row * ROW_SIZE);
+        const bx = cx + (posInRow - (cntInRow - 1) / 2) * SPACING;
+        const by = this.y - row * ROW_H - 4;
+        this.game.addBullet(new Bullet(bx - CFG.B_W / 2, by, this.game));
       }
       this.game.audio.shoot();
     }
@@ -506,25 +503,39 @@ class Player {
     // Blink when dead
     if (!this.alive && Math.floor(this.blinkTimer / 4) % 2 === 0) return;
     // Rapid blink during invincibility
-    if (this.invTimer > 0 && Math.floor(this.invTimer / 5) % 2 === 0) return;
+    const blinking = this.invTimer > 0 && Math.floor(this.invTimer / 5) % 2 === 0;
+    if (blinking) return;
 
-    const img = this.game.img.shooter;
-    if (img) {
-      ctx.drawImage(img, this.x, this.y, this.w, this.h);
-    } else {
-      // Fallback soldier
-      ctx.fillStyle = '#1a6bb5';
-      ctx.fillRect(this.x + 6, this.y + 14, this.w - 12, this.h - 14);
-      ctx.fillStyle = '#c8a46e';
-      ctx.beginPath();
-      ctx.arc(this.x + this.w / 2, this.y + 10, 11, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#2a2a2a';  // helmet
-      ctx.beginPath();
-      ctx.ellipse(this.x + this.w / 2, this.y + 6, 13, 9, 0, Math.PI, 0);
-      ctx.fill();
-      ctx.fillStyle = '#555';    // gun
-      ctx.fillRect(this.x + this.w / 2 - 3, this.y - 16, 6, 18);
+    const count    = this.game._soldierCount;
+    const SPACING  = 58;
+    const ROW_SIZE = 4;
+    const ROW_H    = this.h + 8;
+    const cx       = this.x + this.w / 2;
+    const img      = this.game.img.shooter;
+
+    for (let i = 0; i < count; i++) {
+      const row      = Math.floor(i / ROW_SIZE);
+      const posInRow = i % ROW_SIZE;
+      const cntInRow = Math.min(ROW_SIZE, count - row * ROW_SIZE);
+      const sx = cx + (posInRow - (cntInRow - 1) / 2) * SPACING - this.w / 2;
+      const sy = this.y - row * ROW_H;
+      if (img) {
+        ctx.drawImage(img, sx, sy, this.w, this.h);
+      } else {
+        // Fallback soldier
+        ctx.fillStyle = '#1a6bb5';
+        ctx.fillRect(sx + 6, sy + 14, this.w - 12, this.h - 14);
+        ctx.fillStyle = '#c8a46e';
+        ctx.beginPath();
+        ctx.arc(sx + this.w / 2, sy + 10, 11, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#2a2a2a';
+        ctx.beginPath();
+        ctx.ellipse(sx + this.w / 2, sy + 6, 13, 9, 0, Math.PI, 0);
+        ctx.fill();
+        ctx.fillStyle = '#555';
+        ctx.fillRect(sx + this.w / 2 - 3, sy - 16, 6, 18);
+      }
     }
   }
 
@@ -728,7 +739,7 @@ class Game {
     this._waveMsgT   = 0;
     this._dmgText    = '';
     this._dmgTextT   = 0;
-    this._dualShot        = false;
+    this._soldierCount    = 1;
     this._friendlySoldier = null;
 
     // Pre-render fallback map into an offscreen canvas
@@ -787,7 +798,7 @@ class Game {
     this._dmgText    = '';
     this._dmgTextT   = 0;
     this._lives           = CFG.LIVES;
-    this._dualShot        = false;
+    this._soldierCount    = 1;
     this._friendlySoldier = null;
     this.player = new Player(this);
     this.state  = 'playing';
@@ -826,6 +837,12 @@ class Game {
       if (this._wave % 3 === 0 && !this._friendlySoldier) {
         this._friendlySoldier = new FriendlySoldier(this);
       }
+      // Bonus life every 10 waves
+      if (this._wave % 10 === 0) {
+        this._lives++;
+        this._dmgText  = `★ WAVE ${this._wave} — +1 LIFE!`;
+        this._dmgTextT = 220;
+      }
     }
     if (this._waveMsgT > 0) this._waveMsgT--;
 
@@ -838,6 +855,8 @@ class Game {
       // Extra enemies — starts from wave 2, becomes more frequent with wave
       if (this._wave >= 2 && Math.random() < 0.45) this._spawnEnemy();
       if (this._wave >= 5 && Math.random() < 0.35) this._spawnEnemy();
+      // Extra spawn per additional soldier (more firepower → more zombies)
+      for (let s = 1; s < this._soldierCount; s++) this._spawnEnemy();
     }
 
     // Entity updates
@@ -889,7 +908,15 @@ class Game {
 
     this._lives--;
 
-    this._dmgText = escaped ? 'ZOMBIE ESCAPED! -1 LIFE' : 'HIT!';
+    // Also lose a soldier if we have extras
+    if (this._soldierCount > 1) {
+      this._soldierCount--;
+      this._dmgText = escaped
+        ? `ZOMBIE ESCAPED! -1 LIFE -1 SOLDIER`
+        : `HIT! -1 SOLDIER`;
+    } else {
+      this._dmgText = escaped ? 'ZOMBIE ESCAPED! -1 LIFE' : 'HIT!';
+    }
     this._dmgTextT = 110;
 
     if (this._lives <= 0) {
@@ -900,10 +927,10 @@ class Game {
     }
   }
 
-  // ── Ally rescued → dual shot ────────────────────────────────────
+  // ── Ally rescued → +1 soldier ───────────────────────────────────
   _rescueSoldier() {
-    this._dualShot = true;
-    this._dmgText  = '★ ALLY RESCUED — DUAL SHOT!';
+    this._soldierCount++;
+    this._dmgText  = `★ ALLY RESCUED — ${this._soldierCount} SOLDIERS!`;
     this._dmgTextT = 200;
   }
 
@@ -1043,24 +1070,20 @@ class Game {
     }
     ctx.globalAlpha = 1;
 
-    // Wave (center) + dual-shot badge
+    // Wave (center) + soldier count badge
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    if (this._dualShot) {
-      // Shift wave text left slightly to make room for badge
-      ctx.fillStyle = '#ffee00';
-      ctx.font = `bold ${fz}px 'Courier New', monospace`;
-      ctx.fillText(`WAVE  ${this._wave}`, cw / 2 - 48, mid);
-      // Dual shot badge
+    ctx.fillStyle = '#ffee00';
+    ctx.font = `bold ${fz}px 'Courier New', monospace`;
+    if (this._soldierCount > 1) {
+      ctx.fillText(`WAVE  ${this._wave}`, cw / 2 - 52, mid);
       const pulse = Math.sin(Date.now() / 250) * 0.3 + 0.7;
       ctx.globalAlpha = pulse;
       ctx.fillStyle = '#00ffaa';
       ctx.font = `bold ${Math.round(fz * 0.78)}px 'Courier New', monospace`;
-      ctx.fillText('★ DUAL', cw / 2 + 52, mid);
+      ctx.fillText(`★ x${this._soldierCount}`, cw / 2 + 48, mid);
       ctx.globalAlpha = 1;
     } else {
-      ctx.fillStyle = '#ffee00';
-      ctx.font = `bold ${fz}px 'Courier New', monospace`;
       ctx.fillText(`WAVE  ${this._wave}`, cw / 2, mid);
     }
 
