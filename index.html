@@ -50,6 +50,30 @@
     }
     #overlay button:hover { background: #fff; color: #000; }
 
+    #instructions {
+      direction: rtl;
+      text-align: right;
+      margin: 0.6rem auto 1.6rem;
+      max-width: 480px;
+      width: 90%;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 6px;
+      padding: 0.9em 1.2em;
+      font-size: clamp(0.72rem, 2vw, 0.95rem);
+      line-height: 1.85;
+      color: rgba(255,255,255,0.88);
+    }
+    #instructions .section-title {
+      color: #4eff4e;
+      font-weight: bold;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.15em;
+      font-size: 1.05em;
+    }
+    #instructions .row { display: flex; justify-content: space-between; gap: 1em; }
+    #instructions .key { color: #ffee00; font-weight: bold; white-space: nowrap; }
+
     /* Controls hint at bottom */
     #controls-hint {
       position: fixed; bottom: 14px; left: 0; right: 0;
@@ -69,8 +93,27 @@
 
 <div id="overlay" class="start">
   <h1 id="ol-title">ZOMBIE RUSH</h1>
-  <p  id="ol-sub">Defend the city. Shoot down the horde.</p>
-  <button id="ol-btn">START GAME</button>
+  <p  id="ol-sub">הגן על העיר. עצור את עדר הזומבים.</p>
+
+  <div id="instructions">
+    <div class="section-title">🎮 שליטה</div>
+    <div class="row"><span>תנועה שמאל / ימין</span><span class="key">← → &nbsp;|&nbsp; A D</span></div>
+    <div class="row"><span>ירייה</span><span class="key">SPACE &nbsp;|&nbsp; W &nbsp;|&nbsp; ↑</span></div>
+    <br/>
+    <div class="section-title">⚔️ מכניקת משחק</div>
+    <div class="row"><span>כל 3 גלים — חייל מסייע יורד מלמעלה</span><span class="key">ALLY</span></div>
+    <div class="row"><span>החייל מגיע אליך בשלום — מצטרף לפורמציה</span><span class="key">+1 חייל</span></div>
+    <div class="row"><span>פגיעה / זומבי שברח</span><span class="key">−1 חיים −1 חייל</span></div>
+    <div class="row"><span>כל 10 גלים — בונוס</span><span class="key">+1 חיים ❤️</span></div>
+    <br/>
+    <div class="section-title">💀 סוגי זומבים</div>
+    <div class="row"><span>רגיל</span><span class="key">10 נק'</span></div>
+    <div class="row"><span>משוגע (זיגזג)</span><span class="key">15 נק'</span></div>
+    <div class="row"><span>מהיר</span><span class="key">20 נק'</span></div>
+    <div class="row"><span>בוס (10 חיים)</span><span class="key">150 נק'</span></div>
+  </div>
+
+  <button id="ol-btn">התחל משחק</button>
 </div>
 
 <div id="controls-hint">
