@@ -166,8 +166,9 @@ class Input {
 // ═══════════════════════════════════════════════════════════════════
 class AudioManager {
   constructor() {
-    this._ac    = null;
-    this.muted  = false;
+    this._ac         = null;
+    this.muted       = false;
+    this._reverbBuf  = null;   // cached impulse-response buffer (computed once)
   }
 
   // Lazy-init AudioContext (browser requires prior user gesture)
@@ -179,37 +180,67 @@ class AudioManager {
     return this._ac;
   }
 
-  // ── Gunshot  (pure noise — no oscillators) ────────────────────
+  // Build a synthetic reverb impulse-response once and cache it.
+  // Technique from web.dev/webaudio-games + MDN ConvolverNode docs.
+  _getReverb(ac) {
+    if (this._reverbBuf) return this._reverbBuf;
+    const sr  = ac.sampleRate;
+    const len = Math.ceil(sr * 0.55);          // 550 ms tail
+    const buf = ac.createBuffer(2, len, sr);
+    for (let c = 0; c < 2; c++) {
+      const d = buf.getChannelData(c);
+      for (let i = 0; i < len; i++) {
+        // Exponentially decaying random noise → realistic room scatter
+        d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.2);
+      }
+    }
+    this._reverbBuf = buf;
+    return buf;
+  }
+
+  // ── Gunshot: pre-shaped noise + wet/dry convolver reverb ──────
+  // Architecture: crack → dry path | body+thump → reverb (wet) path
+  // Source: web.dev/webaudio-games, MDN createConvolver()
   shoot() {
     if (this.muted) return;
-    const ac = this.ac, t = ac.currentTime;
-    const sr = ac.sampleRate;
+    const ac  = this.ac, t = ac.currentTime;
+    const sr  = ac.sampleRate;
+    const dur = 0.20;
+    const len = Math.ceil(sr * dur);
 
-    // One shared noise buffer (0.25 s)
-    const buf = ac.createBuffer(1, Math.ceil(sr * 0.25), sr);
+    // Per-sample exponential decay baked into buffer → sharpest possible attack
+    const buf = ac.createBuffer(1, len, sr);
     const d   = buf.getChannelData(0);
-    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    for (let i = 0; i < len; i++) {
+      d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.038));
+    }
 
-    // Helper: noise source → filter → gain envelope → output
-    const layer = (filterType, freq, q, peak, decay, delay = 0) => {
+    // Reverb convolver (wet channel)
+    const conv  = ac.createConvolver();
+    conv.buffer = this._getReverb(ac);
+    const wet   = ac.createGain(); wet.gain.value = 0.38;
+    conv.connect(wet); wet.connect(ac.destination);
+
+    // Dry output (direct to speakers)
+    const dry = ac.createGain(); dry.gain.value = 1.0;
+    dry.connect(ac.destination);
+
+    const layer = (filterType, freqA, freqB, gain, out) => {
       const s = ac.createBufferSource(); s.buffer = buf;
-      const f = ac.createBiquadFilter();
-      f.type = filterType; f.frequency.value = freq; if (q) f.Q.value = q;
-      const g = ac.createGain();
-      g.gain.setValueAtTime(peak, t + delay);
-      g.gain.exponentialRampToValueAtTime(0.001, t + delay + decay);
-      s.connect(f); f.connect(g); g.connect(ac.destination);
-      s.start(t + delay); s.stop(t + delay + decay + 0.01);
+      const f = ac.createBiquadFilter(); f.type = filterType;
+      f.frequency.setValueAtTime(freqA, t);
+      if (freqB) f.frequency.exponentialRampToValueAtTime(freqB, t + 0.10);
+      const g = ac.createGain(); g.gain.value = gain;
+      s.connect(f); f.connect(g); g.connect(out);
+      s.start(t); s.stop(t + dur + 0.01);
     };
 
-    // Crack  — very short, bright transient
-    layer('highpass',  3800, 0,   4.0, 0.028);
-    // Bang   — mid-frequency body
-    layer('bandpass',   700, 0.5, 3.5, 0.13);
-    // Thump  — low rumble from filtered noise (NOT a sine sweep)
-    layer('lowpass',    160, 0,   5.0, 0.10);
-    // Tail   — slight decaying echo
-    layer('bandpass',   500, 0.4, 1.2, 0.18, 0.04);
+    // Crack  — dry (close, sharp, no reverb smear)
+    layer('highpass', 3200, null,  4.2, dry);
+    // Body   — wet (5 kHz → 220 Hz sweep + room echo = "POW")
+    layer('lowpass',  5000, 220,   3.8, conv);
+    // Thump  — dry (sub doesn't need reverb, stays tight)
+    layer('lowpass',   110, null,  5.5, dry);
   }
 
   // ── Zombie groan "גרררר" ───────────────────────────────────────
@@ -335,24 +366,36 @@ class FriendlySoldier {
     const rl   = game.roadL, rr = game.roadR;
     this.x     = rand(rl + 10, rr - this.w - 10);
     this.y     = CFG.HUD_H;
-    this.speed = 1.3;
+    this.speedY    = 2.4;          // descent speed (faster than normal zombies ~1.8)
+    this._lastShot = 0;            // timestamp of last shot (ms)
     this.active   = true;
-    this.resolved = false;   // outcome already processed
-    this._pulse   = 0;       // animation timer
+    this.resolved = false;         // outcome already processed
+    this._pulse   = 0;             // animation timer
   }
 
   update() {
     if (!this.active) return;
-    this.y += this.speed;
     this._pulse++;
 
-    // Reached the player → rescued
+    // ── Descend toward player ──
+    this.y += this.speedY;
+
+    // ── Shoot upward (same cadence as player + small offset so not perfectly synced) ──
+    const now = performance.now();
+    if (now - this._lastShot >= CFG.SHOOT_CD + 80) {
+      this._lastShot = now;
+      const cx = this.x + this.w / 2;
+      this.game.addBullet(new Bullet(cx - CFG.B_W / 2, this.y - 4, this.game));
+      this.game.audio.shoot();
+    }
+
+    // ── Reached the player → rescued ──
     if (this.y + this.h >= this.game.player.y - 10) {
       this._finish(true);
       return;
     }
 
-    // Hit by a zombie
+    // ── Hit by a zombie ──
     const sb = this.bounds();
     for (const e of this.game.enemies) {
       if (e.active && aabb(sb, e.bounds())) {
@@ -408,7 +451,7 @@ class FriendlySoldier {
     ctx.textAlign   = 'center';
     ctx.fillStyle   = '#00ffaa';
     ctx.shadowColor = '#000'; ctx.shadowBlur = 6;
-    ctx.fillText('ALLY ↓', this.x + this.w / 2, this.y - 7);
+    ctx.fillText('ALLY', this.x + this.w / 2, this.y - 7);
     ctx.restore();
   }
 
@@ -773,14 +816,14 @@ class Game {
       if (this.enemies.length > 0) this.audio.groan();
     }
 
-    // Wave progression
-    this._wave = 1 + Math.floor(this._score / CFG.WAVE_STEP);
+    // Wave progression — thresholds double each wave: 250, 500, 1000, 2000, 4000...
+    this._wave = this._score < 250 ? 1 : 2 + Math.floor(Math.log2(this._score / 250));
     if (this._wave !== this._prevWave) {
       this._prevWave = this._wave;
       this._waveMsg  = `WAVE  ${this._wave}`;
       this._waveMsgT = 200;
-      // Spawn rescue ally every 5 waves (only if none currently active)
-      if (this._wave % 5 === 0 && !this._friendlySoldier) {
+      // Spawn rescue ally every 3 waves starting at wave 3
+      if (this._wave % 3 === 0 && !this._friendlySoldier) {
         this._friendlySoldier = new FriendlySoldier(this);
       }
     }
@@ -846,12 +889,7 @@ class Game {
 
     this._lives--;
 
-    if (escaped) {
-      this._score      = Math.max(0, this._score - CFG.ESCAPE_PENALTY);
-      this._dmgText    = `-${CFG.ESCAPE_PENALTY}  ESCAPED!`;
-    } else {
-      this._dmgText    = 'HIT!';
-    }
+    this._dmgText = escaped ? 'ZOMBIE ESCAPED! -1 LIFE' : 'HIT!';
     this._dmgTextT = 110;
 
     if (this._lives <= 0) {
@@ -1026,6 +1064,31 @@ class Game {
       ctx.fillText(`WAVE  ${this._wave}`, cw / 2, mid);
     }
 
+    // Wave progress bar (bottom of HUD)
+    const waveStart = this._wave === 1 ? 0 : 250 * Math.pow(2, this._wave - 2);
+    const waveEnd   = 250 * Math.pow(2, this._wave - 1);
+    const pct       = Math.min(1, (this._score - waveStart) / (waveEnd - waveStart));
+    const barH = 5, barY = CFG.HUD_H - barH;
+    const barPad = 12;
+    const barW = cw - barPad * 2;
+    // Track
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    ctx.fillRect(barPad, barY, barW, barH);
+    // Fill
+    const grad = ctx.createLinearGradient(barPad, 0, barPad + barW, 0);
+    grad.addColorStop(0,   '#ffee00');
+    grad.addColorStop(0.6, '#ff8800');
+    grad.addColorStop(1,   '#ff3300');
+    ctx.fillStyle = grad;
+    ctx.fillRect(barPad, barY, Math.round(barW * pct), barH);
+    // "WAVE N+1 →" label at right edge
+    ctx.textAlign = 'right';
+    ctx.font = `bold ${Math.round(fz * 0.52)}px 'Courier New', monospace`;
+    ctx.fillStyle = 'rgba(255,238,0,0.7)';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(`WAVE ${this._wave + 1} →`, cw - barPad, barY - 1);
+    ctx.textBaseline = 'middle';
+
     // Controls hint + mute status (right)
     ctx.textAlign = 'right';
     ctx.font = `${Math.round(fz * 0.68)}px 'Courier New', monospace`;
@@ -1194,8 +1257,22 @@ class Game {
 
   // Log which assets loaded so you can diagnose missing files in the console
   Object.entries(rawImg).forEach(([k, v]) =>
-    console.log(`[Asset] ${k}: ${v ? 'OK' : 'MISSING — fallback drawing used'}`)
+    console.log(`[Asset] ${k}: ${v ? `OK (${v.naturalWidth}×${v.naturalHeight})` : 'MISSING — fallback drawing used'}`)
   );
+
+  // Auto-size enemy configs from actual image dimensions.
+  // Each type has a target render HEIGHT; width is computed from the image aspect ratio.
+  const TARGET_H = { normal: 70, crazy: 70, fast: 62, boss: 106 };
+  const SPRITE_KEY = { normal: 'zombie', crazy: 'zombie_crazy', fast: 'zombie_fast', boss: 'zombie_boss' };
+  for (const type of ['normal', 'crazy', 'fast', 'boss']) {
+    const si = rawImg[SPRITE_KEY[type]];
+    if (si && si.naturalWidth && si.naturalHeight) {
+      const scale = TARGET_H[type] / si.naturalHeight;
+      CFG.ENEMY[type].h = TARGET_H[type];
+      CFG.ENEMY[type].w = Math.round(si.naturalWidth * scale);
+      console.log(`[Size] ${type}: ${CFG.ENEMY[type].w}×${CFG.ENEMY[type].h}`);
+    }
+  }
 
   const img = rawImg;
 
