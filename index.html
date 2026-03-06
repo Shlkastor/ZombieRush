@@ -527,7 +527,8 @@ class Player {
     const halfFormation  = (row0count - 1) * SPACING / 2;
     if (inp.left)  this.x = Math.max(this.game.roadL + halfFormation, this.x - CFG.P_SPEED);
     if (inp.right) this.x = Math.min(this.game.roadR - this.w - halfFormation, this.x + CFG.P_SPEED);
-    if (inp.shoot && now - this.lastShot >= CFG.SHOOT_CD) {
+    const shootCd = Math.max(70, CFG.SHOOT_CD - (count - 1) * 30);
+    if (inp.shoot && now - this.lastShot >= shootCd) {
       this.lastShot = now;
       const cx = this.x + this.w / 2;
       for (let i = 0; i < count; i++) {
