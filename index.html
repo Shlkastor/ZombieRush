@@ -383,6 +383,50 @@ class AudioManager {
     }
   }
 
+  // ── Grenade explosion (deep boom + rumble) ───────────────────
+  explosion() {
+    if (this.muted) return;
+    const ac = this.ac, t = ac.currentTime;
+    const sr = ac.sampleRate;
+
+    // Sub-boom: deep sine drop
+    const osc = ac.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(90, t);
+    osc.frequency.exponentialRampToValueAtTime(22, t + 0.6);
+    const gBoom = ac.createGain();
+    gBoom.gain.setValueAtTime(2.2, t);
+    gBoom.gain.exponentialRampToValueAtTime(0.001, t + 0.65);
+    osc.connect(gBoom); gBoom.connect(ac.destination);
+    osc.start(t); osc.stop(t + 0.65);
+
+    // Noise burst: white noise filtered to mid for the "crack"
+    const len = Math.ceil(sr * 0.35);
+    const buf = ac.createBuffer(1, len, sr);
+    const d   = buf.getChannelData(0);
+    for (let i = 0; i < len; i++)
+      d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.06));
+    const src = ac.createBufferSource(); src.buffer = buf;
+    const bp  = ac.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.value = 800; bp.Q.value = 0.6;
+    const gNoise = ac.createGain(); gNoise.gain.value = 3.5;
+    src.connect(bp); bp.connect(gNoise); gNoise.connect(ac.destination);
+    src.start(t); src.stop(t + 0.35);
+
+    // Rumble tail: low-freq noise
+    const len2 = Math.ceil(sr * 0.8);
+    const buf2 = ac.createBuffer(1, len2, sr);
+    const d2   = buf2.getChannelData(0);
+    for (let i = 0; i < len2; i++)
+      d2[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.25));
+    const src2 = ac.createBufferSource(); src2.buffer = buf2;
+    const lp   = ac.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 120;
+    const gRumble = ac.createGain(); gRumble.gain.value = 2.0;
+    src2.connect(lp); lp.connect(gRumble); gRumble.connect(ac.destination);
+    src2.start(t); src2.stop(t + 0.8);
+  }
+
   toggleMute() { this.muted = !this.muted; return this.muted; }
 }
 
@@ -706,14 +750,16 @@ class Bullet {
 //  POWER-UP  (falling collectibles)
 // ═══════════════════════════════════════════════════════════════════
 const POWERUP_CFG = {
-  spread: { color: '#00ffee', label: '↙ ↑ ↗',  title: 'SPREAD', duration: 15000 },
-  pierce: { color: '#ff44cc', label: '● ● ●',  title: 'PIERCE', duration: 15000 },
+  spread:  { color: '#00ffee', label: '↙ ↑ ↗',  title: 'SPREAD',  duration: 15000 },
+  pierce:  { color: '#ff44cc', label: '● ● ●',  title: 'PIERCE',  duration: 15000 },
+  grenade: { color: '#ff8800', label: '💣',      title: 'GRENADE', duration: 30000 },
 };
 
 class PowerUp {
   constructor(game) {
     this.game   = game;
-    this.type   = Math.random() < 0.5 ? 'spread' : 'pierce';
+    const r = Math.random();
+    this.type = r < 0.35 ? 'spread' : r < 0.7 ? 'pierce' : 'grenade';
     this.w      = 38; this.h = 38;
     const rl    = game.roadL, rr = game.roadR;
     this.x      = rand(rl + 10, rr - this.w - 10);
@@ -758,6 +804,59 @@ class PowerUp {
     ctx.fillText(cfg.label,  this.x + this.w / 2, this.y + this.h / 2 - 5);
     ctx.font = 'bold 8px monospace';
     ctx.fillText(cfg.title,  this.x + this.w / 2, this.y + this.h / 2 + 10);
+    ctx.restore();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  GRENADE  (auto-fires toward map center when power-up active)
+// ═══════════════════════════════════════════════════════════════════
+class Grenade {
+  constructor(game) {
+    this.game = game;
+    const pb  = game.player.bounds();
+    this.x    = pb.x + pb.w / 2;
+    this.y    = pb.y;
+    this.tx   = game.canvas.width  / 2;
+    this.ty   = game.canvas.height / 2;
+    const dist = Math.hypot(this.tx - this.x, this.ty - this.y);
+    this.vx    = (this.tx - this.x) / dist * 9;
+    this.vy    = (this.ty - this.y) / dist * 9;
+    this.active = true;
+  }
+
+  update() {
+    this.x += this.vx;
+    this.y += this.vy;
+    if (Math.hypot(this.tx - this.x, this.ty - this.y) < 14) {
+      this._explode();
+    }
+  }
+
+  _explode() {
+    this.active = false;
+    this.game.audio.explosion();
+    const RADIUS = 200;
+    for (const e of this.game.enemies) {
+      if (!e.active) continue;
+      const ex = e.x + e.cfg.w / 2;
+      const ey = e.y + e.cfg.h / 2;
+      if (Math.hypot(ex - this.tx, ey - this.ty) <= RADIUS) {
+        while (e.active) {
+          if (e.hit()) this.game._score += e.score;
+        }
+      }
+    }
+  }
+
+  draw(ctx) {
+    ctx.save();
+    ctx.fillStyle   = '#ff8800';
+    ctx.shadowColor = '#ffee00';
+    ctx.shadowBlur  = 10;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, 5, 0, Math.PI * 2);
+    ctx.fill();
     ctx.restore();
   }
 }
@@ -899,6 +998,8 @@ class Game {
     this.canvas = canvas;
     this.ctx    = canvas.getContext('2d');
     this.img    = img;
+    this._maps  = ['map','map2','map3','map4','map5','map6','map7'].filter(k => img[k]);
+    this._currentMap = this._maps[Math.floor(Math.random() * this._maps.length)];
     this.input  = new Input();
     this.audio  = new AudioManager();
     this.state  = 'start';   // 'start' | 'playing' | 'gameover'
@@ -913,11 +1014,12 @@ class Game {
     this._frame      = 0;
     this._spawnTimer = 0;
     this._groanTimer = 0;   // frames until next zombie groan
-    this._wave       = 1;
-    this._prevWave   = 1;
-    this._score      = 0;
-    this._waveMsg    = '';
-    this._waveMsgT   = 0;
+    this._wave           = 1;
+    this._prevWave       = 1;
+    this._score          = 0;
+    this._waveMsg        = '';
+    this._waveMsgT       = 0;
+    this._waveTransitionT = 0;
     this._dmgText    = '';
     this._dmgTextT   = 0;
     this._soldierCount    = 1;
@@ -927,6 +1029,9 @@ class Game {
     this._nextPowerUpIn   = Math.round(rand(1800, 3200));
     this._spreadExpires   = 0;
     this._pierceExpires   = 0;
+    this._grenadeExpires  = 0;
+    this._grenadeTimer    = 0;
+    this._grenades        = [];
 
     // Pre-render fallback map into an offscreen canvas
     this._fallbackMap = this._buildFallbackMap();
@@ -965,7 +1070,13 @@ class Game {
 
     const { w: ew, h: eh } = CFG.ENEMY[type];
     const x = rand(rl, rr - ew);
-    this.enemies.push(new Enemy(x, -eh, type, this));
+    const enemy = new Enemy(x, -eh, type, this);
+    // From wave 10: enemies get faster each wave (+8% per wave)
+    if (w >= 10) {
+      const mult = 1 + (w - 9) * 0.08;
+      enemy.cfg = { ...enemy.cfg, speed: enemy.cfg.speed * mult };
+    }
+    this.enemies.push(enemy);
   }
 
   // ── Start / Restart ─────────────────────────────────────────────
@@ -978,8 +1089,9 @@ class Game {
     this._score      = 0;
     this._wave       = 1;
     this._prevWave   = 1;
-    this._waveMsg    = '';
-    this._waveMsgT   = 0;
+    this._waveMsg         = '';
+    this._waveMsgT        = 0;
+    this._waveTransitionT = 0;
     this._groanTimer = 60;
     this._dmgText    = '';
     this._dmgTextT   = 0;
@@ -991,6 +1103,9 @@ class Game {
     this._nextPowerUpIn   = Math.round(rand(1800, 3200));
     this._spreadExpires   = 0;
     this._pierceExpires   = 0;
+    this._grenadeExpires  = 0;
+    this._grenadeTimer    = 0;
+    this._grenades        = [];
     this.player = new Player(this);
     this.state  = 'playing';
   }
@@ -1031,12 +1146,20 @@ class Game {
       if (this.enemies.length > 0) this.audio.groan();
     }
 
-    // Wave progression — thresholds double each wave: 250, 500, 1000, 2000, 4000...
-    this._wave = this._score < 250 ? 1 : 2 + Math.floor(Math.log2(this._score / 250));
+    // Wave progression — doubles up to wave 10 (64000 pts), then flat +8000 per wave
+    const WAVE10_SCORE = 64000;
+    this._wave = this._score < 250
+      ? 1
+      : this._score < WAVE10_SCORE
+        ? 2 + Math.floor(Math.log2(this._score / 250))
+        : 10 + Math.floor((this._score - WAVE10_SCORE) / 8000);
     if (this._wave !== this._prevWave) {
-      this._prevWave = this._wave;
-      this._waveMsg  = `WAVE  ${this._wave}`;
-      this._waveMsgT = 200;
+      this._prevWave        = this._wave;
+      this._waveMsg         = `WAVE  ${this._wave}`;
+      this._waveMsgT        = 200;
+      this._waveTransitionT = 180;  // ~3 sec pause, no spawning
+      // Pick a new random map for this wave
+      this._currentMap = this._maps[Math.floor(Math.random() * this._maps.length)];
       // Spawn rescue ally every 3 waves starting at wave 3
       if (this._wave % 3 === 0 && !this._friendlySoldier) {
         this._friendlySoldier = new FriendlySoldier(this);
@@ -1048,6 +1171,7 @@ class Game {
         this._dmgTextT = 220;
       }
     }
+    if (this._waveTransitionT > 0) { this._waveTransitionT--; return; }
     if (this._waveMsgT > 0) this._waveMsgT--;
 
     // Enemy spawning
@@ -1057,22 +1181,38 @@ class Game {
       this._spawnTimer = 0;
       this._spawnEnemy();
       // Extra enemies — starts from wave 2, becomes more frequent with wave
-      if (this._wave >= 2 && Math.random() < 0.45) this._spawnEnemy();
-      if (this._wave >= 5 && Math.random() < 0.35) this._spawnEnemy();
+      if (this._wave >= 2  && Math.random() < 0.45) this._spawnEnemy();
+      if (this._wave >= 5  && Math.random() < 0.35) this._spawnEnemy();
+      if (this._wave >= 10 && Math.random() < 0.60) this._spawnEnemy();
+      if (this._wave >= 13 && Math.random() < 0.50) this._spawnEnemy();
       // Extra spawn per additional soldier (more firepower → more zombies)
       for (let s = 1; s < this._soldierCount; s++) this._spawnEnemy();
     }
 
     // Power-up expiry (now = ms from performance.now via requestAnimationFrame)
-    if (this._spreadExpires > 0 && now > this._spreadExpires) this._spreadExpires = 0;
-    if (this._pierceExpires > 0 && now > this._pierceExpires) this._pierceExpires = 0;
+    if (this._spreadExpires  > 0 && now > this._spreadExpires)  this._spreadExpires  = 0;
+    if (this._pierceExpires  > 0 && now > this._pierceExpires)  this._pierceExpires  = 0;
+    if (this._grenadeExpires > 0 && now > this._grenadeExpires) this._grenadeExpires = 0;
+
+    // Grenade auto-fire every 5 sec (300 frames) while active
+    if (this._grenadeExpires > now) {
+      this._grenadeTimer++;
+      if (this._grenadeTimer >= 300) {
+        this._grenadeTimer = 0;
+        this._grenades.push(new Grenade(this));
+      }
+    }
+    this._grenades.forEach(g => g.update());
+    this._grenades = this._grenades.filter(g => g.active);
 
     // Power-up spawning (one at a time on road)
+    // From wave 7+ spawn twice as often
+    const puInterval = this._wave >= 7 ? rand(450, 900) : rand(900, 1800);
     this._powerUpTimer++;
     if (this._powerUpTimer >= this._nextPowerUpIn && this._powerUps.length === 0) {
       this._powerUps.push(new PowerUp(this));
       this._powerUpTimer  = 0;
-      this._nextPowerUpIn = Math.round(rand(900, 1800));
+      this._nextPowerUpIn = Math.round(puInterval);
     }
 
     // Entity updates
@@ -1158,14 +1298,18 @@ class Game {
   }
 
   _collectPowerUp(type) {
-    const dur  = POWERUP_CFG[type].duration;
+    const dur     = POWERUP_CFG[type].duration;
     const expires = performance.now() + dur;
     if (type === 'spread') {
-      this._spreadExpires = expires;
+      this._spreadExpires  = expires;
       this._dmgText = '↙↑↗ SPREAD SHOT!';
-    } else {
-      this._pierceExpires = expires;
+    } else if (type === 'pierce') {
+      this._pierceExpires  = expires;
       this._dmgText = '● PIERCE SHOT!';
+    } else if (type === 'grenade') {
+      this._grenadeExpires = expires;
+      this._grenadeTimer   = 295;  // fire first grenade almost immediately
+      this._dmgText = '💣 GRENADE LAUNCHER!';
     }
     this._dmgTextT = 160;
   }
@@ -1188,7 +1332,7 @@ class Game {
     const ch  = this.canvas.height;
 
     // Map / background
-    const mapImg = this.img.map;
+    const mapImg = this.img[this._currentMap];
     if (mapImg) {
       ctx.drawImage(mapImg, 0, 0, cw, ch);
     } else {
@@ -1227,6 +1371,7 @@ class Game {
 
     // Game entities
     this._powerUps.forEach(p => p.draw(ctx));
+    this._grenades.forEach(g => g.draw(ctx));
     this.bullets.forEach(b => b.draw(ctx));
     this.enemies.forEach(e => e.draw(ctx));
     if (this._friendlySoldier) this._friendlySoldier.draw(ctx);
@@ -1264,8 +1409,28 @@ class Game {
       ctx.restore();
     }
 
-    // Wave notification
-    if (this._waveMsgT > 0) {
+    // Wave transition overlay (full-screen, fades out)
+    if (this._waveTransitionT > 0) {
+      const fadeIn  = 1 - Math.max(0, (this._waveTransitionT - 150) / 30);  // fade in over 30 frames
+      const fadeOut = Math.min(1, this._waveTransitionT / 40);               // fade out last 40 frames
+      const alpha   = Math.min(fadeIn, fadeOut);
+      ctx.save();
+      // Dark overlay
+      ctx.globalAlpha = alpha * 0.72;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, cw, ch);
+      // Wave text
+      ctx.globalAlpha = alpha;
+      const sz = Math.round(Math.min(cw, ch) * 0.11);
+      ctx.font = `bold ${sz}px 'Courier New', monospace`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ffee00';
+      ctx.shadowColor = '#ff6600';
+      ctx.shadowBlur  = 48;
+      ctx.fillText(this._waveMsg, cw / 2, ch * 0.45);
+      ctx.restore();
+    } else if (this._waveMsgT > 0) {
+      // Small lingering text after transition ends
       const alpha = Math.min(1, this._waveMsgT / 40);
       ctx.save();
       ctx.globalAlpha = alpha;
@@ -1337,9 +1502,16 @@ class Game {
     }
 
     // Wave progress bar (bottom of HUD)
-    const waveStart = this._wave === 1 ? 0 : 250 * Math.pow(2, this._wave - 2);
-    const waveEnd   = 250 * Math.pow(2, this._wave - 1);
-    const pct       = Math.min(1, (this._score - waveStart) / (waveEnd - waveStart));
+    const WAVE10_SCORE = 64000;
+    let waveStart, waveEnd;
+    if (this._wave < 10) {
+      waveStart = this._wave === 1 ? 0 : 250 * Math.pow(2, this._wave - 2);
+      waveEnd   = 250 * Math.pow(2, this._wave - 1);
+    } else {
+      waveStart = WAVE10_SCORE + (this._wave - 10) * 8000;
+      waveEnd   = waveStart + 8000;
+    }
+    const pct = Math.min(1, (this._score - waveStart) / (waveEnd - waveStart));
     const barH = 5, barY = CFG.HUD_H - barH;
     const barPad = 12;
     const barW = cw - barPad * 2;
@@ -1384,6 +1556,17 @@ class Game {
       ctx.textAlign   = 'right';
       ctx.fillText(`SPREAD ${secs}s`, puX, mid);
       puX -= ctx.measureText(`SPREAD ${secs}s`).width + 18;
+      ctx.globalAlpha = 1;
+    }
+    if (this._grenadeExpires > nowMs) {
+      const secs      = Math.ceil((this._grenadeExpires - nowMs) / 1000);
+      const nextIn    = Math.ceil((300 - this._grenadeTimer) / 60);
+      const pulse     = Math.sin(nowMs / 200) * 0.3 + 0.7;
+      ctx.globalAlpha = pulse;
+      ctx.fillStyle   = '#ff8800';
+      ctx.textAlign   = 'right';
+      ctx.fillText(`💣 ${secs}s (→${nextIn}s)`, puX, mid);
+      puX -= ctx.measureText(`💣 ${secs}s (→${nextIn}s)`).width + 18;
       ctx.globalAlpha = 1;
     }
 
@@ -1541,6 +1724,12 @@ class Game {
   // Load all assets (null if file not found → fallback rendering)
   const rawImg = await loadAll({
     map:          'Map.png',
+    map2:         'Map2.png',
+    map3:         'Map3.png',
+    map4:         'Map4.png',
+    map5:         'Map5.png',
+    map6:         'Map6.png',
+    map7:         'Map7.png',
     shooter:      'Shooter.png',
     zombie:       'Zombie.png',
     zombie_crazy: 'Zombie_Crazy.png',
