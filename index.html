@@ -185,10 +185,11 @@ const CFG = {
 
   // Enemy type definitions  (+10% size vs original)
   ENEMY: {
-    normal: { speed: 1.8,  hp: 1,  score: 10,  w: 53, h: 70 },
-    crazy:  { speed: 1.5,  hp: 1,  score: 15,  w: 53, h: 70, zigzag: 72, freq: 0.055 },
-    fast:   { speed: 4.2,  hp: 1,  score: 20,  w: 44, h: 62 },
-    boss:   { speed: 0.85, hp: 10, score: 150, w: 88, h: 106 },
+    normal: { speed: 1.8,  hp: 1,  score: 10,  w: 53,  h: 70  },
+    crazy:  { speed: 1.5,  hp: 1,  score: 15,  w: 53,  h: 70,  zigzag: 72, freq: 0.055 },
+    fast:   { speed: 4.2,  hp: 1,  score: 20,  w: 44,  h: 62  },
+    boss:   { speed: 0.85, hp: 10, score: 150, w: 88,  h: 106 },
+    boss2:  { speed: 0.65, hp: 22, score: 350, w: 88,  h: 106 },
   },
 };
 
@@ -530,7 +531,7 @@ class FriendlySoldier {
     if (!this.active) return;
 
     // Hit flash
-    const img = this.game.img.shooter;
+    const img = this.game.img[this.game._currentShooter];
     ctx.save();
     if (img) {
       if (this._flash > 0 && this._flash % 3 < 2)
@@ -655,7 +656,7 @@ class Player {
     const ROW_SIZE = 4;
     const ROW_H    = this.h + 8;
     const cx       = this.x + this.w / 2;
-    const img      = this.game.img.shooter;
+    const img      = this.game.img[this.game._currentShooter];
 
     for (let i = 0; i < count; i++) {
       const row      = Math.floor(i / ROW_SIZE);
@@ -869,13 +870,15 @@ const ZOMBIE_COLORS = {
   crazy:  '#6e2a6e',
   fast:   '#a84a00',
   boss:   '#8b0000',
+  boss2:  '#4b0082',
 };
 const ZOMBIE_IMG_KEY = {
-  normal: 'zombie',
   crazy:  'zombie_crazy',
   fast:   'zombie_fast',
-  boss:   'zombie_boss',
+  boss:   'zombie_boss1',
+  boss2:  'zombie_boss2',
 };
+const ZOMBIE_NORMAL_IMGS = ['zombie1','zombie2','zombie3','zombie4','zombie5'];
 
 class Enemy {
   constructor(x, y, type, game) {
@@ -887,6 +890,10 @@ class Enemy {
     this.y     = y;
     this.w     = this.cfg.w;
     this.h     = this.cfg.h;
+    // Pick a random sprite for normal zombies; fixed key for all others
+    this.imgKey = type === 'normal'
+      ? ZOMBIE_NORMAL_IMGS[Math.floor(Math.random() * ZOMBIE_NORMAL_IMGS.length)]
+      : ZOMBIE_IMG_KEY[type];
     this.hp    = this.cfg.hp;
     this.maxHp = this.cfg.hp;
     this.score = this.cfg.score;
@@ -919,13 +926,14 @@ class Enemy {
     if (this.hp <= 0) {
       this.active = false;
       // Kill sound
-      if (this.type === 'boss') this.game.audio.bossKill();
-      else                      this.game.audio.kill();
+      if (this.type === 'boss' || this.type === 'boss2') this.game.audio.bossKill();
+      else                                                this.game.audio.kill();
       // Spawn particles
       const cx = this.x + this.w / 2;
       const cy = this.y + this.h / 2;
       const col = ZOMBIE_COLORS[this.type];
-      for (let i = 0; i < (this.type === 'boss' ? 20 : 8); i++) {
+      const isBoss = this.type === 'boss' || this.type === 'boss2';
+      for (let i = 0; i < (isBoss ? 20 : 8); i++) {
         this.game.particles.push(new Particle(cx, cy, col));
         this.game.particles.push(new Particle(cx, cy, '#8b0000'));
       }
@@ -942,7 +950,7 @@ class Enemy {
       ctx.filter = 'brightness(6) saturate(0)';
     }
 
-    const img = this.game.img[ZOMBIE_IMG_KEY[this.type]];
+    const img = this.game.img[this.imgKey];
     if (img) {
       ctx.drawImage(img, this.x, this.y, this.w, this.h);
     } else {
@@ -998,8 +1006,10 @@ class Game {
     this.canvas = canvas;
     this.ctx    = canvas.getContext('2d');
     this.img    = img;
-    this._maps  = ['map','map2','map3','map4','map5','map6','map7'].filter(k => img[k]);
+    this._maps    = ['map','map2','map3','map4','map5','map6','map7'].filter(k => img[k]);
     this._currentMap = this._maps[Math.floor(Math.random() * this._maps.length)];
+    this._shooters = ['shooter1','shooter2','shooter3'].filter(k => img[k]);
+    this._currentShooter = this._shooters[Math.floor(Math.random() * this._shooters.length)];
     this.input  = new Input();
     this.audio  = new AudioManager();
     this.state  = 'start';   // 'start' | 'playing' | 'gameover'
@@ -1058,15 +1068,17 @@ class Game {
     const rl = this.roadL, rr = this.roadR;
     const r = Math.random();
     const w = this._wave;
+    const boss2P = w >= 6 ? Math.min(0.05, (w - 5) * 0.007) : 0;
     const bossP  = Math.min(0.07, 0.025 + w * 0.006);
     const fastP  = Math.min(0.28, 0.10  + w * 0.018);
     const crazyP = Math.min(0.35, 0.15  + w * 0.018);
 
     let type;
-    if      (r < bossP)                    type = 'boss';
-    else if (r < bossP + fastP)            type = 'fast';
-    else if (r < bossP + fastP + crazyP)   type = 'crazy';
-    else                                   type = 'normal';
+    if      (r < boss2P)                              type = 'boss2';
+    else if (r < boss2P + bossP)                      type = 'boss';
+    else if (r < boss2P + bossP + fastP)              type = 'fast';
+    else if (r < boss2P + bossP + fastP + crazyP)     type = 'crazy';
+    else                                              type = 'normal';
 
     const { w: ew, h: eh } = CFG.ENEMY[type];
     const x = rand(rl, rr - ew);
@@ -1158,8 +1170,9 @@ class Game {
       this._waveMsg         = `WAVE  ${this._wave}`;
       this._waveMsgT        = 200;
       this._waveTransitionT = 180;  // ~3 sec pause, no spawning
-      // Pick a new random map for this wave
-      this._currentMap = this._maps[Math.floor(Math.random() * this._maps.length)];
+      // Pick a new random map and shooter for this wave
+      this._currentMap     = this._maps[Math.floor(Math.random() * this._maps.length)];
+      this._currentShooter = this._shooters[Math.floor(Math.random() * this._shooters.length)];
       // Spawn rescue ally every 3 waves starting at wave 3
       if (this._wave % 3 === 0 && !this._friendlySoldier) {
         this._friendlySoldier = new FriendlySoldier(this);
@@ -1730,17 +1743,19 @@ class Game {
     map5:         'Map5.png',
     map6:         'Map6.png',
     map7:         'Map7.png',
-    shooter:      'Shooter.png',
-    zombie:       'Zombie.png',
-    zombie_crazy: 'Zombie_Crazy.png',
-    zombie_fast:  'Zombie_Fast.png',
-    zombie_boss:  'Zombie_Boss.png',
+    shooter1:     'Shooter.png',
+    shooter2:     'Shooter 2.png',
+    shooter3:     'Shooter 3.png',
+    zombie1:      'Zombie 1.png',
+    zombie2:      'Zombie 2.png',
+    zombie3:      'Zombie 3.png',
+    zombie4:      'Zombie 4.png',
+    zombie5:      'Zombie 5.png',
+    zombie_crazy: 'Zombie Crazy.png',
+    zombie_fast:  'Zombie Fast.png',
+    zombie_boss1: 'Zombie Boss 1.png',
+    zombie_boss2: 'Zombie Boss 2.png',
   });
-
-  // If Zombie_Crazy.png failed, try the alternate typo spelling Zombie_Carzy.png
-  if (!rawImg.zombie_crazy) {
-    rawImg.zombie_crazy = await loadImg('Zombie_Carzy.png');
-  }
 
   // Log which assets loaded so you can diagnose missing files in the console
   Object.entries(rawImg).forEach(([k, v]) =>
@@ -1748,10 +1763,9 @@ class Game {
   );
 
   // Auto-size enemy configs from actual image dimensions.
-  // Each type has a target render HEIGHT; width is computed from the image aspect ratio.
-  const TARGET_H = { normal: 70, crazy: 70, fast: 62, boss: 106 };
-  const SPRITE_KEY = { normal: 'zombie', crazy: 'zombie_crazy', fast: 'zombie_fast', boss: 'zombie_boss' };
-  for (const type of ['normal', 'crazy', 'fast', 'boss']) {
+  const TARGET_H   = { normal: 70, crazy: 70, fast: 62, boss: 106, boss2: 116 };
+  const SPRITE_KEY  = { normal: 'zombie1', crazy: 'zombie_crazy', fast: 'zombie_fast', boss: 'zombie_boss1', boss2: 'zombie_boss2' };
+  for (const type of ['normal', 'crazy', 'fast', 'boss', 'boss2']) {
     const si = rawImg[SPRITE_KEY[type]];
     if (si && si.naturalWidth && si.naturalHeight) {
       const scale = TARGET_H[type] / si.naturalHeight;
